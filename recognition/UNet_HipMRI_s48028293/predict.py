@@ -1,2 +1,173 @@
 # Showing example usage of your trained model. It should load your saved model
 # weights, run inference on test cases, print out any results, and provide visualisations where applicable
+
+"""
+predict.py - example usage of a trained model on the HipMRI test split.
+
+Loads the saved weights, runs inference on the test cases, prints per-class
+Dice / IoU, and saves:
+    per_volume_dice.csv      Dice of every class for every test volume
+    per_slice_prostate.csv   prostate Dice of every test slice
+    dice_by_position.png     prostate Dice along the gland (end slices vs middle)
+    failure_cases.png        input | ground truth | prediction | error overlay
+                            for the worst prostate slices
+
+Example (uses ../runs/unet2d/best_model.pt by default):
+    python predict.py
+"""
+import argparse
+import csv
+import os
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from dataset import PROSTATE, HipMRI2D, get_splits
+from modules import build_model
+from utils import evaluate, format_results
+
+DEFAULT_DATA_ROOT = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
+RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Run a trained HipMRI model on the test split")
+    p.add_argument("--model", default="unet2d", help="which run folder to use")
+    p.add_argument("--checkpoint", default=None, help="default: ../runs/<model>/best_model.pt")
+    p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    p.add_argument("--out-dir", default=None, help="default: ../runs/<model>")
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--n-failures", type=int, default=5, help="worst slices to visualise")
+    p.add_argument("--limit", type=int, default=None, help="first N test slices only")
+    args = p.parse_args()
+    if args.out_dir is None:
+        args.out_dir = os.path.join(RUNS_DIR, args.model)
+    if args.checkpoint is None:
+        args.checkpoint = os.path.join(RUNS_DIR, args.model, "best_model.pt")
+    return args
+
+def add_positions(rows):
+    """Add 'position' to every prostate-containing slice: 0 and 1 are the two
+    end slices of the gland (base / apex), 0.5 is the middle."""
+    volumes = {}
+    for r in rows:
+        if r["target_px"] > 0:
+            volumes.setdefault((r["case"], r["week"]), []).append(r)
+    for vol_rows in volumes.values():
+        vol_rows.sort(key=lambda r: r["slice"])
+        for i, r in enumerate(vol_rows):
+            r["position"] = i / (len(vol_rows) - 1) if len(vol_rows) > 1 else 0.5
+
+def plot_dice_by_position(rows, path, n_bins=10):
+    pos = np.array([r["position"] for r in rows if "position" in r])
+    dice = np.array([r["dice"] for r in rows if "position" in r])
+    bins = np.minimum((pos * n_bins).astype(int), n_bins - 1)
+    centres = (np.arange(n_bins) + 0.5) / n_bins
+    means = [dice[bins == b].mean() if np.any(bins == b) else np.nan for b in range(n_bins)]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.bar(centres, means, width=0.9 / n_bins)
+    ax.set_xlabel("position along the prostate (0 and 1 = end slices, 0.5 = mid-gland)")
+    ax.set_ylabel("mean slice DSC (prostate)")
+    ax.set_title("Prostate Dice by slice position")
+    ax.set_ylim(0, 1)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+def plot_failures(model, dataset, rows, device, num_classes, path):
+    """Multi-panel figure for the given slices (rows from per_slice)."""
+    fig, axes = plt.subplots(len(rows), 4, figsize=(12, 3.2 * len(rows)), squeeze=False)
+    model.eval()
+    for ax_row, r in zip(axes, rows):
+        image, mask, _, _, _ = dataset[r["index"]]
+        with torch.no_grad():
+            pred = model(image[None].to(device)).argmax(dim=1)[0].cpu().numpy()
+        image, mask = image[0].numpy(), mask.numpy()
+
+        # Prostate error overlay: green = correct, red = false positive
+        # (leakage into neighbouring tissue), blue = false negative (missed).
+        lo, hi = np.percentile(image, [1, 99])
+        grey = np.clip((image - lo) / (hi - lo + 1e-8), 0, 1)
+        overlay = np.stack([grey] * 3, axis=-1)
+        p, t = pred == PROSTATE, mask == PROSTATE
+        overlay[p & t] = [0.0, 0.8, 0.0]
+        overlay[p & ~t] = [1.0, 0.0, 0.0]
+        overlay[~p & t] = [0.0, 0.3, 1.0]
+
+        ax_row[0].imshow(grey, cmap="gray")
+        ax_row[0].set_title(f"case {r['case']} week {r['week']} slice {r['slice']}", fontsize=9)
+        ax_row[1].imshow(mask, cmap="viridis", vmin=0, vmax=num_classes - 1)
+        ax_row[1].set_title("ground truth", fontsize=9)
+        ax_row[2].imshow(pred, cmap="viridis", vmin=0, vmax=num_classes - 1)
+        ax_row[2].set_title("prediction", fontsize=9)
+        ax_row[3].imshow(overlay)
+        ax_row[3].set_title(f"prostate errors (DSC {r['dice']:.2f}): red FP, blue FN", fontsize=9)
+        for ax in ax_row:
+            ax.axis("off")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Rebuild the model exactly as it was trained and load the weights.
+    ckpt = torch.load(args.checkpoint, map_location=device)
+    num_classes, class_names = ckpt["num_classes"], ckpt["class_names"]
+    model = build_model(ckpt["model"], num_classes, base=ckpt["base"]).to(device)
+    model.load_state_dict(ckpt["model_state_dict"])
+    print(f"Loaded {ckpt['model']} from epoch {ckpt['epoch']} "
+        f"(val prostate DSC {ckpt['val_prostate_dice']:.4f})")
+
+    # Same test split as training (no shuffling, so slice order is stable).
+    pairs = get_splits(args.data_root, resplit=ckpt.get("resplit", False),
+                    seed=ckpt.get("seed", 42))["test"]
+    if args.limit:
+        pairs = pairs[:args.limit]
+    dataset = HipMRI2D(pairs, ckpt["img_size"])
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+                        num_workers=args.workers)
+
+    meter, _, forward_time = evaluate(model, loader, device, num_classes)
+    print("\nTest results (per volume)")
+    print(format_results(meter, class_names))
+    print(f"Inference time per case: {forward_time / len(meter.volumes):.3f} s")
+
+    # Per-volume table.
+    keys, dice, _ = meter.per_volume()
+    with open(os.path.join(args.out_dir, "per_volume_dice.csv"), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["case", "week"] + list(class_names))
+        for (case, week), row in zip(keys, dice):
+            writer.writerow([case, week] + [f"{d:.4f}" for d in row])
+    worst = np.argsort(dice[:, PROSTATE])[:3]
+    print("Lowest prostate DSC volumes:",
+        ", ".join(f"case {keys[i][0]} week {keys[i][1]} ({dice[i, PROSTATE]:.3f})" for i in worst))
+
+    # Per-slice prostate table and the position analysis.
+    rows = meter.per_slice(PROSTATE)
+    add_positions(rows)
+    with open(os.path.join(args.out_dir, "per_slice_prostate.csv"), "w", newline="") as f:
+        fields = ["index", "case", "week", "slice", "dice", "target_px", "pred_px", "position"]
+        writer = csv.DictWriter(f, fieldnames=fields, restval="")
+        writer.writeheader()
+        writer.writerows(rows)
+    plot_dice_by_position(rows, os.path.join(args.out_dir, "dice_by_position.png"))
+
+    # Failure cases: the prostate-containing slices with the lowest Dice.
+    with_prostate = [r for r in rows if r["target_px"] > 0]
+    failures = sorted(with_prostate, key=lambda r: r["dice"])[:args.n_failures]
+    if failures:
+        plot_failures(model, dataset, failures, device, num_classes,
+                    os.path.join(args.out_dir, "failure_cases.png"))
+    print(f"\nFigures and tables saved to {args.out_dir}")
+
+if __name__ == "__main__":
+    main()
