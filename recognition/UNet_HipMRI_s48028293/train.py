@@ -1,1 +1,181 @@
 # Containing the source code for training, validating, testing, and saving your model
+
+import argparse
+import json
+import os
+import time
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+
+from dataset import CLASS_NAMES, IMG_SIZE, NUM_CLASSES, PROSTATE, get_loaders
+from modules import CombinedLoss, build_model
+from utils import evaluate, format_results
+
+DEFAULT_DATA_ROOT = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
+# Results go in a "runs" folder next to (not inside) the code folder.
+RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Train a HipMRI segmentation model")
+    p.add_argument("--model", default="unet2d")
+    p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    p.add_argument("--out-dir", default=None, help="default: ../runs/<model>")
+    p.add_argument("--epochs", type=int, default=30)
+    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--base", type=int, default=64, help="channels in the first level")
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--resplit", action="store_true",
+                    help="pool all slices and re-split by patient ID")
+    p.add_argument("--limit", type=int, default=None,
+                    help="use only the first N slices per split (smoke test)")
+    p.add_argument("--no-preload", action="store_true",
+                    help="read slices from disk each epoch instead of caching in RAM")
+    args = p.parse_args()
+    if args.out_dir is None:
+        args.out_dir = os.path.join(RUNS_DIR, args.model)
+    return args
+
+
+def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
+    model.train()
+    use_cuda = device.type == "cuda"
+    total_loss, n_batches = 0.0, 0
+    for images, masks, _, _, _ in loader:
+        images = images.to(device, non_blocking=True)
+        masks = masks.to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast(device_type="cuda", enabled=use_cuda):
+            logits = model(images)
+            loss = criterion(logits, masks)
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+        total_loss += loss.item()
+        n_batches += 1
+    return total_loss / max(n_batches, 1)
+
+def plot_history(history, path):
+    epochs = range(1, len(history["train_loss"]) + 1)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+    ax1.plot(epochs, history["train_loss"], label="train")
+    ax1.plot(epochs, history["val_loss"], label="validation")
+    ax1.set_xlabel("epoch")
+    ax1.set_ylabel("cross-entropy + Dice loss")
+    ax1.set_title("Loss")
+    ax1.legend()
+
+    val_dice = np.array(history["val_dice"])  # (epochs, classes)
+    for c, name in enumerate(CLASS_NAMES):
+        ax2.plot(epochs, val_dice[:, c], label=name,
+                linewidth=2.5 if c == PROSTATE else 1.0)
+    ax2.axhline(0.75, color="grey", linestyle="--", linewidth=0.8)
+    ax2.set_xlabel("epoch")
+    ax2.set_ylabel("validation DSC (per volume)")
+    ax2.set_title("Validation Dice per class")
+    ax2.set_ylim(0, 1)
+    ax2.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+
+def main():
+    args = parse_args()
+    os.makedirs(args.out_dir, exist_ok=True)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    torch.backends.cudnn.benchmark = True
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_cuda = device.type == "cuda"
+    print("Using device:", device)
+    if use_cuda:
+        print("GPU:", torch.cuda.get_device_name(0))
+
+    loaders = get_loaders(args.data_root, batch_size=args.batch_size, workers=args.workers,
+                        resplit=args.resplit, limit=args.limit,
+                        preload=not args.no_preload, seed=args.seed)
+
+    model = build_model(args.model, NUM_CLASSES, base=args.base).to(device)
+    n_params = sum(p.numel() for p in model.parameters())
+    print(f"Model: {args.model} | parameters: {n_params:,}")
+
+    criterion = CombinedLoss(NUM_CLASSES)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    scaler = torch.amp.GradScaler(device="cuda", enabled=use_cuda)
+
+    history = {"train_loss": [], "val_loss": [], "val_dice": []}
+    best_dice, best_epoch = -1.0, 0
+    ckpt_path = os.path.join(args.out_dir, "best_model.pt")
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats()
+
+    print("\nStarting training...")
+    train_start = time.time()
+    for epoch in range(1, args.epochs + 1):
+        epoch_start = time.time()
+        train_loss = train_one_epoch(model, loaders["train"], criterion, optimizer, scaler, device)
+        meter, val_loss, _ = evaluate(model, loaders["val"], device, NUM_CLASSES, criterion)
+        scheduler.step()
+
+        val_dice = meter.mean_dice()
+        history["train_loss"].append(train_loss)
+        history["val_loss"].append(val_loss)
+        history["val_dice"].append(val_dice.tolist())
+
+        flag = ""
+        if val_dice[PROSTATE] > best_dice:  # keep the best model, not the last one
+            best_dice, best_epoch = float(val_dice[PROSTATE]), epoch
+            torch.save({"model_state_dict": model.state_dict(), "model": args.model,
+                        "base": args.base, "num_classes": NUM_CLASSES,
+                        "class_names": CLASS_NAMES, "img_size": IMG_SIZE,
+                        "resplit": args.resplit, "seed": args.seed,
+                        "epoch": epoch, "val_prostate_dice": best_dice}, ckpt_path)
+            flag = " *saved*"
+        print(f"Epoch [{epoch}/{args.epochs}] train loss {train_loss:.4f} | "
+                f"val loss {val_loss:.4f} | val DSC prostate {val_dice[PROSTATE]:.4f} "
+                f"mean {np.nanmean(val_dice):.4f} | {time.time() - epoch_start:.1f}s{flag}", flush=True)
+
+        # Rewritten every epoch so a cancelled job still leaves its curves behind.
+        plot_history(history, os.path.join(args.out_dir, "training_curves.png"))
+        with open(os.path.join(args.out_dir, "history.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+    train_time = time.time() - train_start
+    train_vram = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0.0
+    print(f"\nTraining time: {train_time / 60:.1f} min | best epoch {best_epoch} "
+            f"(val prostate DSC {best_dice:.4f})")
+
+    # ---- Test the best checkpoint on the held-out test split ----
+    model.load_state_dict(torch.load(ckpt_path, map_location=device)["model_state_dict"])
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats()
+    meter, test_loss, forward_time = evaluate(model, loaders["test"], device, NUM_CLASSES, criterion)
+    infer_vram = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0.0
+    n_volumes = len(meter.volumes)
+
+    report = "\n".join([
+        f"Model: {args.model} (base {args.base}, {n_params:,} parameters)",
+        f"Best epoch: {best_epoch} of {args.epochs}",
+        f"Training time: {train_time / 60:.1f} min",
+        f"Peak VRAM, training:  {train_vram:.0f} MiB (batch size {args.batch_size})",
+        f"Peak VRAM, inference: {infer_vram:.0f} MiB (batch size {args.batch_size})",
+        f"Inference time per case: {forward_time / max(n_volumes, 1):.3f} s (model forward only)",
+        f"Test loss: {test_loss:.4f}",
+        "",
+        "Test results (per volume)",
+        format_results(meter, CLASS_NAMES),
+    ])
+    print("\n" + report)
+    with open(os.path.join(args.out_dir, "test_report.txt"), "w") as f:
+        f.write(report + "\n")
+    print(f"\nOutputs saved to {args.out_dir}")
+
+if __name__ == "__main__":
+    main()
