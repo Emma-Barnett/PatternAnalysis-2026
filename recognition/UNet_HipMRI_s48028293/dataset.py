@@ -66,6 +66,7 @@ def assert_no_leakage(splits):
                     f"cases {sorted(shared)}. Re-run with --resplit."
                 )
 
+# Not being implemented, currently using given splits
 def split_by_patient(pairs, fractions=(0.7, 0.15, 0.15), seed=42):
     """Split slices into train/val/test so that every slice (and every weekly
     scan) of a patient lands in exactly one split."""

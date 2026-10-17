@@ -10,5 +10,7 @@
 source $HOME/miniconda3/bin/activate
 conda activate torch
 
-python train.py
-python predict.py
+OUT=../runs/unet_2d_$SLURM_JOB_ID
+
+python train.py --out-dir $OUT
+python predict.py --out-dir $OUT --checkpoint $OUT/best_model.pt

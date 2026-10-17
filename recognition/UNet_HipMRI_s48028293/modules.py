@@ -65,7 +65,6 @@ class UNet2D(nn.Module):
         u1 = self.dec1(torch.cat([self.up1(u2), d1], dim=1))
         return self.out_conv(u1)
 
-
 class DiceLoss(nn.Module):
     """
     Soft multi-class Dice loss, averaged over classes.
@@ -88,7 +87,6 @@ class DiceLoss(nn.Module):
         cardinality = torch.sum(probs + onehot, dims)
         dice = (2.0 * intersection + self.eps) / (cardinality + self.eps)
         return 1.0 - dice.mean()
-
 
 class CombinedLoss(nn.Module):
     """Cross-entropy + Dice. Dice counters the heavy class imbalance (the

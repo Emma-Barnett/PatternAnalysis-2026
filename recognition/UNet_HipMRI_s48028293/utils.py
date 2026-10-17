@@ -87,10 +87,13 @@ def evaluate(model, loader, device, num_classes, criterion=None):
 def format_results(meter, class_names):
     """Per-class Dice and IoU (mean +/- std over volumes) as printable text."""
     keys, dice, iou = meter.per_volume()
+    
     lines = [f"Volumes evaluated: {len(keys)}",
-            f"{'class':12s} {'DSC mean':>9s} {'DSC std':>8s} {'DSC min':>8s} {'IoU mean':>9s}"]
+            f"{'class':12s} {'DSC mean':>9s} {'DSC std':>8s} {'DSC min':>8s} "
+            f"{'IoU mean':>9s} {'IoU std':>8s}"]
     for c, name in enumerate(class_names):
         lines.append(f"{name:12s} {np.nanmean(dice[:, c]):9.4f} {np.nanstd(dice[:, c]):8.4f} "
-                    f"{np.nanmin(dice[:, c]):8.4f} {np.nanmean(iou[:, c]):9.4f}")
+                    f"{np.nanmin(dice[:, c]):8.4f} {np.nanmean(iou[:, c]):9.4f} "
+                    f"{np.nanstd(iou[:, c]):8.4f}")
     lines.append(f"{'mean':12s} {np.nanmean(dice):9.4f} {'':8s} {'':8s} {np.nanmean(iou):9.4f}")
     return "\n".join(lines)

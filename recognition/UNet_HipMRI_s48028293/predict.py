@@ -135,18 +135,31 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.workers)
 
+    use_cuda = device.type == "cuda"
+    if use_cuda:
+        torch.backends.cudnn.benchmark = False
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     meter, _, forward_time = evaluate(model, loader, device, num_classes)
+    vram = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0.0
     print("\nTest results (per volume)")
     print(format_results(meter, class_names))
     print(f"Inference time per case: {forward_time / len(meter.volumes):.3f} s")
+    print(f"Peak VRAM, inference: {vram:.0f} MiB (batch size {args.batch_size})")
 
     # Per-volume table.
-    keys, dice, _ = meter.per_volume()
-    with open(os.path.join(args.out_dir, "per_volume_dice.csv"), "w", newline="") as f:
+    keys, dice, iou = meter.per_volume()
+    with open(os.path.join(args.out_dir, "per_volume_metrics.csv"), "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["case", "week"] + list(class_names))
-        for (case, week), row in zip(keys, dice):
-            writer.writerow([case, week] + [f"{d:.4f}" for d in row])
+        writer.writerow(["case", "week"]
+                        + [f"dice_{n}" for n in class_names]
+                        + [f"iou_{n}" for n in class_names])
+        for (case, week), d_row, i_row in zip(keys, dice, iou):
+            writer.writerow([case, week]
+                            + [f"{d:.4f}" for d in d_row]
+                            + [f"{i:.4f}" for i in i_row])
+
+
     worst = np.argsort(dice[:, PROSTATE])[:3]
     print("Lowest prostate DSC volumes:",
         ", ".join(f"case {keys[i][0]} week {keys[i][1]} ({dice[i, PROSTATE]:.3f})" for i in worst))

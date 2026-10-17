@@ -89,7 +89,7 @@ def main():
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
@@ -154,7 +154,9 @@ def main():
 
     # ---- Test the best checkpoint on the held-out test split ----
     model.load_state_dict(torch.load(ckpt_path, map_location=device)["model_state_dict"])
+    del optimizer, scheduler, scaler  # free optimizer state so it isn't counted in inference VRAM
     if use_cuda:
+        torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
     meter, test_loss, forward_time = evaluate(model, loaders["test"], device, NUM_CLASSES, criterion)
     infer_vram = torch.cuda.max_memory_allocated() / 1024**2 if use_cuda else 0.0
