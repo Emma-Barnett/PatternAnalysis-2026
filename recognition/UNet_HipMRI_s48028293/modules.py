@@ -6,15 +6,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class DoubleConv(nn.Module):
-    """Two 3x3 convolutions, each followed by batch norm and ReLU."""
-    def __init__(self, in_ch, out_ch):
+    """Two 3x3 (2D) or 3x3x3 (3D) convolutions, each followed by batch norm and ReLU."""
+    def __init__(self, in_ch, out_ch, dims=2):
         super().__init__()
+        Conv = nn.Conv2d if dims == 2 else nn.Conv3d
+        Norm = nn.BatchNorm2d if dims == 2 else nn.BatchNorm3d
         self.block = nn.Sequential(
-            nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            Conv(in_ch, out_ch, 3, padding=1, bias=False),
+            Norm(out_ch),
             nn.ReLU(inplace=True),
-            nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
-            nn.BatchNorm2d(out_ch),
+            Conv(out_ch, out_ch, 3, padding=1, bias=False),
+            Norm(out_ch),
             nn.ReLU(inplace=True),
         )
 
@@ -51,6 +53,51 @@ class UNet2D(nn.Module):
 
         # One logit per class per pixel.
         self.out_conv = nn.Conv2d(base, num_classes, 1)
+
+    def forward(self, x):
+        d1 = self.down1(x)
+        d2 = self.down2(self.pool(d1))
+        d3 = self.down3(self.pool(d2))
+        d4 = self.down4(self.pool(d3))
+        b = self.bottleneck(self.pool(d4))
+
+        u4 = self.dec4(torch.cat([self.up4(b), d4], dim=1))
+        u3 = self.dec3(torch.cat([self.up3(u4), d3], dim=1))
+        u2 = self.dec2(torch.cat([self.up2(u3), d2], dim=1))
+        u1 = self.dec1(torch.cat([self.up1(u2), d1], dim=1))
+        return self.out_conv(u1)
+
+class UNet3D(nn.Module):
+    """
+    3D U-Net (Cicek et al., 2016) with the same four-level topology as UNet2D,
+    but with volumetric 3x3x3 convolutions, 2x2x2 max pooling, 2x2x2 transposed
+    convolutions and skip connections that carry whole feature volumes.
+
+    Input:  (B, in_ch, X, Y, Z) with X, Y and Z divisible by 16.
+    Output: (B, num_classes, X, Y, Z) raw logits.
+    """
+
+    def __init__(self, num_classes, in_ch=1, base=16):
+        super().__init__()
+        # Encoder
+        self.down1 = DoubleConv(in_ch, base, dims=3)
+        self.down2 = DoubleConv(base, base * 2, dims=3)
+        self.down3 = DoubleConv(base * 2, base * 4, dims=3)
+        self.down4 = DoubleConv(base * 4, base * 8, dims=3)
+        self.pool = nn.MaxPool3d(2)
+        self.bottleneck = DoubleConv(base * 8, base * 16, dims=3)
+
+        # Decoder
+        self.up4 = nn.ConvTranspose3d(base * 16, base * 8, 2, stride=2)
+        self.dec4 = DoubleConv(base * 16, base * 8, dims=3)
+        self.up3 = nn.ConvTranspose3d(base * 8, base * 4, 2, stride=2)
+        self.dec3 = DoubleConv(base * 8, base * 4, dims=3)
+        self.up2 = nn.ConvTranspose3d(base * 4, base * 2, 2, stride=2)
+        self.dec2 = DoubleConv(base * 4, base * 2, dims=3)
+        self.up1 = nn.ConvTranspose3d(base * 2, base, 2, stride=2)
+        self.dec1 = DoubleConv(base * 2, base, dims=3)
+
+        self.out_conv = nn.Conv3d(base, num_classes, 1)
 
     def forward(self, x):
         d1 = self.down1(x)
@@ -105,4 +152,6 @@ def build_model(name, num_classes, base=64):
     """Create a model by name. New models get registered here."""
     if name == "unet2d":
         return UNet2D(num_classes, in_ch=1, base=base)
-    raise ValueError(f"Unknown model '{name}'. Available: unet2d")
+    if name == "unet3d":
+        return UNet3D(num_classes, in_ch=1, base=base)
+    raise ValueError(f"Unknown model '{name}'. Available: unet2d, unet3d")
