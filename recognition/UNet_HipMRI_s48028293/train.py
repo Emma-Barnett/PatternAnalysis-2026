@@ -11,7 +11,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from dataset import CLASS_NAMES, IMG_SIZE, NUM_CLASSES, PROSTATE, get_loaders
+from dataset import (CLASS_NAMES, DATA_ROOT_3D, DOWNSAMPLE, IMG_SIZE, NUM_CLASSES,
+                    PROSTATE, VOL_SIZE, get_loaders)
 from modules import CombinedLoss, build_model
 from utils import evaluate, format_results
 
@@ -19,15 +20,22 @@ DEFAULT_DATA_ROOT = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
 # Results go in a "runs" folder next to (not inside) the code folder.
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
 
+# Defaults that differ between the models (any can be overridden on the command line).
+# A volume has ~64x the voxels of a slice, so 3D gets a small batch and narrower layers.
+MODEL_DEFAULTS = {
+    "unet2d": dict(data_root=DEFAULT_DATA_ROOT, epochs=30, batch_size=32, base=64),
+    "unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16),
+}
+
 def parse_args():
     p = argparse.ArgumentParser(description="Train a HipMRI segmentation model")
-    p.add_argument("--model", default="unet2d")
-    p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    p.add_argument("--model", default="unet2d", choices=["unet2d", "unet3d"])
+    p.add_argument("--data-root", default=None, help="default depends on --model")
     p.add_argument("--out-dir", default=None, help="default: ../runs/<model>")
-    p.add_argument("--epochs", type=int, default=30)
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--base", type=int, default=64, help="channels in the first level")
+    p.add_argument("--base", type=int, default=None, help="channels in the first level")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--resplit", action="store_true",
@@ -37,10 +45,14 @@ def parse_args():
     p.add_argument("--no-preload", action="store_true",
                     help="read slices from disk each epoch instead of caching in RAM")
     args = p.parse_args()
-    if args.out_dir is None:
-        args.out_dir = os.path.join(RUNS_DIR, args.model)
-    return args
-
+    for key, value in MODEL_DEFAULTS[args.model].items():
+        if getattr(args, key) is None:
+            setattr(args, key, value)
+    args.dims = 3 if args.model == "unet3d" else 2
+    args.img_size = VOL_SIZE if args.dims == 3 else IMG_SIZE
+    if args.out_dir is None:                              # <- new
+        args.out_dir = os.path.join(RUNS_DIR, args.model) # <- new
+    return args  
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
     model.train()
@@ -97,9 +109,9 @@ def main():
     if use_cuda:
         print("GPU:", torch.cuda.get_device_name(0))
 
-    loaders = get_loaders(args.data_root, batch_size=args.batch_size, workers=args.workers,
-                        resplit=args.resplit, limit=args.limit,
-                        preload=not args.no_preload, seed=args.seed)
+    loaders = get_loaders(args.data_root, batch_size=args.batch_size, img_size=args.img_size,
+                        workers=args.workers, resplit=args.resplit, limit=args.limit,
+                        preload=not args.no_preload, seed=args.seed, dims=args.dims)
 
     model = build_model(args.model, NUM_CLASSES, base=args.base).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -133,8 +145,9 @@ def main():
         if val_dice[PROSTATE] > best_dice:  # keep the best model, not the last one
             best_dice, best_epoch = float(val_dice[PROSTATE]), epoch
             torch.save({"model_state_dict": model.state_dict(), "model": args.model,
-                        "base": args.base, "num_classes": NUM_CLASSES,
-                        "class_names": CLASS_NAMES, "img_size": IMG_SIZE,
+                        "dims": args.dims, "base": args.base, "num_classes": NUM_CLASSES,
+                        "class_names": CLASS_NAMES, "img_size": args.img_size,
+                        "downsample": DOWNSAMPLE,
                         "resplit": args.resplit, "seed": args.seed,
                         "epoch": epoch, "val_prostate_dice": best_dice}, ckpt_path)
             flag = " *saved*"

@@ -6,7 +6,7 @@ predict.py - example usage of a trained model on the HipMRI test split.
 
 Loads the saved weights, runs inference on the test cases, prints per-class
 Dice / IoU, and saves:
-    per_volume_dice.csv      Dice of every class for every test volume
+    per_volume_metrics.csv      Dice of every class for every test volume
     per_slice_prostate.csv   prostate Dice of every test slice
     dice_by_position.png     prostate Dice along the gland (end slices vs middle)
     failure_cases.png        input | ground truth | prediction | error overlay
@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import PROSTATE, HipMRI2D, get_splits
+from dataset import (DATA_ROOT_3D, DOWNSAMPLE, PROSTATE, HipMRI2D, HipMRI3D, get_splits, get_volume_splits)
 from modules import build_model
 from utils import evaluate, format_results
 
@@ -38,9 +38,9 @@ def parse_args():
     p = argparse.ArgumentParser(description="Run a trained HipMRI model on the test split")
     p.add_argument("--model", default="unet2d", help="which run folder to use")
     p.add_argument("--checkpoint", default=None, help="default: ../runs/<model>/best_model.pt")
-    p.add_argument("--data-root", default=DEFAULT_DATA_ROOT)
+    p.add_argument("--data-root", default=None, help="default depends on the model")
     p.add_argument("--out-dir", default=None, help="default: ../runs/<model>")
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, default=None, help="default 32 (2D) / 1 (3D)")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--n-failures", type=int, default=5, help="worst slices to visualise")
     p.add_argument("--limit", type=int, default=None, help="first N test slices only")
@@ -83,11 +83,17 @@ def plot_failures(model, dataset, rows, device, num_classes, path):
     """Multi-panel figure for the given slices (rows from per_slice)."""
     fig, axes = plt.subplots(len(rows), 4, figsize=(12, 3.2 * len(rows)), squeeze=False)
     model.eval()
+    cache = {}  # 3D: predict each volume once, then cut out the slices
     for ax_row, r in zip(axes, rows):
-        image, mask, _, _, _ = dataset[r["index"]]
-        with torch.no_grad():
-            pred = model(image[None].to(device)).argmax(dim=1)[0].cpu().numpy()
-        image, mask = image[0].numpy(), mask.numpy()
+        if r["index"] not in cache:
+            image, mask, _, _, _ = dataset[r["index"]]
+            with torch.no_grad():
+                pred = model(image[None].to(device)).argmax(dim=1)[0].cpu().numpy()
+            cache[r["index"]] = (image[0].numpy(), mask.numpy(), pred)
+        image, mask, pred = cache[r["index"]]
+        if image.ndim == 3:  # 3D volume (X, Y, Z): take slice z
+            z = r["slice"]
+            image, mask, pred = image[..., z], mask[..., z], pred[..., z]
 
         # Prostate error overlay: green = correct, red = false positive
         # (leakage into neighbouring tissue), blue = false negative (missed).
@@ -127,12 +133,20 @@ def main():
         f"(val prostate DSC {ckpt['val_prostate_dice']:.4f})")
 
     # Same test split as training (no shuffling, so slice order is stable).
-    pairs = get_splits(args.data_root, resplit=ckpt.get("resplit", False),
+    dims = ckpt.get("dims", 2)  # old 2D checkpoints have no "dims"
+    if args.data_root is None:
+        args.data_root = DATA_ROOT_3D if dims == 3 else DEFAULT_DATA_ROOT
+    split_fn = get_volume_splits if dims == 3 else get_splits
+    pairs = split_fn(args.data_root, resplit=ckpt.get("resplit", False),
                     seed=ckpt.get("seed", 42))["test"]
     if args.limit:
         pairs = pairs[:args.limit]
-    dataset = HipMRI2D(pairs, ckpt["img_size"])
-    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+    if dims == 3:
+        dataset = HipMRI3D(pairs, tuple(ckpt["img_size"]), ckpt.get("downsample", DOWNSAMPLE))
+    else:
+        dataset = HipMRI2D(pairs, ckpt["img_size"])
+    batch_size = args.batch_size or (1 if dims == 3 else 32)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=args.workers)
 
     use_cuda = device.type == "cuda"
@@ -145,7 +159,7 @@ def main():
     print("\nTest results (per volume)")
     print(format_results(meter, class_names))
     print(f"Inference time per case: {forward_time / len(meter.volumes):.3f} s")
-    print(f"Peak VRAM, inference: {vram:.0f} MiB (batch size {args.batch_size})")
+    print(f"Peak VRAM, inference: {vram:.0f} MiB (batch size {batch_size})")
 
     # Per-volume table.
     keys, dice, iou = meter.per_volume()
