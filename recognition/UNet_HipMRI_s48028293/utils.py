@@ -11,21 +11,32 @@ class SegMeter:
     def __init__(self, num_classes):
         self.num_classes = num_classes
         self.volumes = {}  # (case, week) -> array (C, 3): intersection, pred, target
-        self.slices = []   # one row per slice: case, week, slice, then (C, 3) counts
+        self.slices = []   # (item index, case, week, slice, (C, 3) counts) per slice
+        self.n_items = 0   # items seen so far = dataset index of the next item
 
     def update(self, preds, targets, cases, weeks, slice_ids):
-        """preds, targets: (B, H, W) integer class maps."""
-        p = F.one_hot(preds, self.num_classes).flatten(1, 2)    # (B, HW, C)
-        t = F.one_hot(targets, self.num_classes).flatten(1, 2)
-        counts = torch.stack([(p * t).sum(1), p.sum(1), t.sum(1)], dim=2)  # (B, C, 3)
+        """preds, targets: (B, H, W) slices or (B, X, Y, Z) volumes, integer class maps."""
+        p = F.one_hot(preds, self.num_classes)  # (B, *spatial, C)
+        t = F.one_hot(targets, self.num_classes)
+        if preds.dim() == 3:   # 2D: one slice per item -> (B, 1, HW, C)
+            p, t = p.flatten(1, 2)[:, None], t.flatten(1, 2)[:, None]
+        else:                  # 3D: move slice axis Z first -> (B, Z, XY, C)
+            p, t = p.movedim(3, 1).flatten(2, 3), t.movedim(3, 1).flatten(2, 3)
+        counts = torch.stack([(p * t).sum(2), p.sum(2), t.sum(2)], dim=3)  # (B, S, C, 3)
         counts = counts.cpu().numpy().astype(np.int64)
         for i in range(counts.shape[0]):
             key = (int(cases[i]), int(weeks[i]))
             if key not in self.volumes:
                 self.volumes[key] = np.zeros((self.num_classes, 3), dtype=np.int64)
-            self.volumes[key] += counts[i]
-            self.slices.append((key[0], key[1], int(slice_ids[i]), counts[i]))
-
+            self.volumes[key] += counts[i].sum(0)
+            if preds.dim() == 3:
+                slice_numbers = [int(slice_ids[i])]
+            else:
+                slice_numbers = range(counts.shape[1])
+            for s, z in enumerate(slice_numbers):
+                self.slices.append((self.n_items, key[0], key[1], z, counts[i, s]))
+            self.n_items += 1
+    
     @staticmethod
     def _dice_iou(counts):
         inter, pred, target = counts[..., 0], counts[..., 1], counts[..., 2]
@@ -45,17 +56,16 @@ class SegMeter:
         """Return a list of dicts with the Dice of one class on every slice.
         'index' is the position in the (unshuffled) dataset."""
         rows = []
-        for index, (case, week, slice_id, counts) in enumerate(self.slices):
+        for index, case, week, slice_id, counts in self.slices:
             dice, _ = self._dice_iou(counts[class_idx])
             rows.append({"index": index, "case": case, "week": week, "slice": slice_id,
-                         "dice": float(dice), "target_px": int(counts[class_idx, 2]),
-                         "pred_px": int(counts[class_idx, 1])})
+                        "dice": float(dice), "target_px": int(counts[class_idx, 2]),
+                        "pred_px": int(counts[class_idx, 1])})
         return rows
 
     def mean_dice(self):
         """Mean Dice per class over volumes, shape (C,)."""
         return np.nanmean(self.per_volume()[1], axis=0)
-
 
 @torch.no_grad()
 def evaluate(model, loader, device, num_classes, criterion=None):
