@@ -1,5 +1,3 @@
-# Containing the source code for training, validating, testing, and saving your model
-
 import argparse
 import json
 import os
@@ -11,25 +9,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from dataset import (CLASS_NAMES, DATA_ROOT_3D, DOWNSAMPLE, IMG_SIZE, NUM_CLASSES,
-                    PROSTATE, VOL_SIZE, get_loaders)
+from dataset import (CLASS_NAMES, DATA_ROOT_3D, DOWNSAMPLE, IMG_SIZE, NUM_CLASSES, PROSTATE, VOL_SIZE, get_loaders)
 from modules import CombinedLoss, build_model
 from utils import evaluate, format_results
 
 DEFAULT_DATA_ROOT = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
-# Results go in a "runs" folder next to (not inside) the code folder.
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
-
-# Defaults that differ between the models (any can be overridden on the command line).
-# A volume has ~64x the voxels of a slice, so 3D gets a small batch and narrower layers.
 MODEL_DEFAULTS = {
     "unet2d": dict(data_root=DEFAULT_DATA_ROOT, epochs=30, batch_size=32, base=64),
     "unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16),
+    "improved_unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16),
 }
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train a HipMRI segmentation model")
-    p.add_argument("--model", default="unet2d", choices=["unet2d", "unet3d"])
+    p.add_argument("--model", default="unet2d", choices=list(MODEL_DEFAULTS))
     p.add_argument("--data-root", default=None, help="default depends on --model")
     p.add_argument("--out-dir", default=None, help="default: ../runs/<model>")
     p.add_argument("--epochs", type=int, default=None)
@@ -48,7 +42,7 @@ def parse_args():
     for key, value in MODEL_DEFAULTS[args.model].items():
         if getattr(args, key) is None:
             setattr(args, key, value)
-    args.dims = 3 if args.model == "unet3d" else 2
+    args.dims = 2 if args.model == "unet2d" else 3
     args.img_size = VOL_SIZE if args.dims == 3 else IMG_SIZE
     if args.out_dir is None:                              # <- new
         args.out_dir = os.path.join(RUNS_DIR, args.model) # <- new

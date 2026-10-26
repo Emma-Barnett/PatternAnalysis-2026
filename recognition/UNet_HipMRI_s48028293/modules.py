@@ -1,6 +1,3 @@
-# Containing the source code of the components of your model. 
-# Source code for DoubleConv, UNet2D, DiceLoss, CombinedLoss, and build_model. 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -112,6 +109,122 @@ class UNet3D(nn.Module):
         u1 = self.dec1(torch.cat([self.up1(u2), d1], dim=1))
         return self.out_conv(u1)
 
+class ContextModule(nn.Module):
+    """Pre-activation residual block (Isensee et al., 2018): two 3x3x3
+    convolutions with dropout between them, each preceded by instance norm and
+    LeakyReLU. The input is added back to the output (residual connection)."""
+
+    def __init__(self, ch, p_drop=0.3):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.InstanceNorm3d(ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv3d(ch, ch, 3, padding=1, bias=False),
+            nn.Dropout3d(p_drop),
+            nn.InstanceNorm3d(ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv3d(ch, ch, 3, padding=1, bias=False),
+        )
+
+    def forward(self, x):
+        return x + self.block(x)
+
+class UpsamplingModule(nn.Module):
+    """Upscale by 2, then a 3x3x3 convolution that halves the channels."""
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="nearest"),
+            nn.Conv3d(in_ch, out_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(out_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+class LocalizationModule(nn.Module):
+    """3x3x3 convolution on the concatenated features, then a 1x1x1
+    convolution that halves the channels."""
+
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv3d(in_ch, in_ch, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(in_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+            nn.Conv3d(in_ch, out_ch, 1, bias=False),
+            nn.InstanceNorm3d(out_ch, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+class ImprovedUNet3D(nn.Module):
+    """
+    3D Improved U-Net (Isensee et al., 2018): residual context modules,
+    strided-convolution downsampling, localization modules, instance norm,
+    LeakyReLU and deep supervision (segmentation maps from three decoder
+    levels are upsampled and summed into one output).
+
+    Input:  (B, in_ch, X, Y, Z) with X, Y and Z divisible by 16.
+    Output: (B, num_classes, X, Y, Z) raw logits.
+    """
+
+    def __init__(self, num_classes, in_ch=1, base=16, p_drop=0.3):
+        super().__init__()
+        b = base
+        # Context (encoder) pathway: conv (stride 2 except level 1) + context module.
+        self.conv1 = nn.Conv3d(in_ch, b, 3, padding=1, bias=False)
+        self.ctx1 = ContextModule(b, p_drop)
+        self.conv2 = nn.Conv3d(b, b * 2, 3, stride=2, padding=1, bias=False)
+        self.ctx2 = ContextModule(b * 2, p_drop)
+        self.conv3 = nn.Conv3d(b * 2, b * 4, 3, stride=2, padding=1, bias=False)
+        self.ctx3 = ContextModule(b * 4, p_drop)
+        self.conv4 = nn.Conv3d(b * 4, b * 8, 3, stride=2, padding=1, bias=False)
+        self.ctx4 = ContextModule(b * 8, p_drop)
+        self.conv5 = nn.Conv3d(b * 8, b * 16, 3, stride=2, padding=1, bias=False)
+        self.ctx5 = ContextModule(b * 16, p_drop)
+
+        # Localization (decoder) pathway.
+        self.up4 = UpsamplingModule(b * 16, b * 8)
+        self.loc4 = LocalizationModule(b * 16, b * 8)
+        self.up3 = UpsamplingModule(b * 8, b * 4)
+        self.loc3 = LocalizationModule(b * 8, b * 4)
+        self.up2 = UpsamplingModule(b * 4, b * 2)
+        self.loc2 = LocalizationModule(b * 4, b * 2)
+        self.up1 = UpsamplingModule(b * 2, b)
+        self.final = nn.Sequential(
+            nn.Conv3d(b * 2, b * 2, 3, padding=1, bias=False),
+            nn.InstanceNorm3d(b * 2, affine=True),
+            nn.LeakyReLU(0.01, inplace=True),
+        )
+
+        # Deep supervision: 1x1x1 segmentation layers at 1/4, 1/2 and full resolution.
+        self.seg3 = nn.Conv3d(b * 4, num_classes, 1)
+        self.seg2 = nn.Conv3d(b * 2, num_classes, 1)
+        self.seg1 = nn.Conv3d(b * 2, num_classes, 1)
+        self.upscale = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
+
+    def forward(self, x):
+        s1 = self.ctx1(self.conv1(x))    # b channels,   full resolution
+        s2 = self.ctx2(self.conv2(s1))   # 2b,           1/2
+        s3 = self.ctx3(self.conv3(s2))   # 4b,           1/4
+        s4 = self.ctx4(self.conv4(s3))   # 8b,           1/8
+        x = self.ctx5(self.conv5(s4))    # 16b,          1/16 (bottleneck)
+
+        x = self.loc4(torch.cat([self.up4(x), s4], dim=1))       # 8b, 1/8
+        l3 = self.loc3(torch.cat([self.up3(x), s3], dim=1))      # 4b, 1/4
+        l2 = self.loc2(torch.cat([self.up2(l3), s2], dim=1))     # 2b, 1/2
+        out = self.final(torch.cat([self.up1(l2), s1], dim=1))   # 2b, full
+
+        # Sum the coarse segmentation maps into the finer ones.
+        seg = self.upscale(self.seg3(l3)) + self.seg2(l2)
+        seg = self.upscale(seg) + self.seg1(out)
+        return seg
+
 class DiceLoss(nn.Module):
     """
     Soft multi-class Dice loss, averaged over classes.
@@ -148,10 +261,14 @@ class CombinedLoss(nn.Module):
     def forward(self, logits, targets):
         return self.ce(logits.float(), targets) + self.dice(logits, targets)
 
+MODELS = {
+    "unet2d": UNet2D,
+    "unet3d": UNet3D,
+    "improved_unet3d": ImprovedUNet3D,
+}
+
 def build_model(name, num_classes, base=64):
-    """Create a model by name. New models get registered here."""
-    if name == "unet2d":
-        return UNet2D(num_classes, in_ch=1, base=base)
-    if name == "unet3d":
-        return UNet3D(num_classes, in_ch=1, base=base)
-    raise ValueError(f"Unknown model '{name}'. Available: unet2d, unet3d")
+    """Create a model by name. New models get registered in MODELS."""
+    if name not in MODELS:
+        raise ValueError(f"Unknown model '{name}'. Available: {', '.join(MODELS)}")
+    return MODELS[name](num_classes, in_ch=1, base=base)

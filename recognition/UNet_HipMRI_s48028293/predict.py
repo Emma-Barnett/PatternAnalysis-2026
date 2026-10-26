@@ -1,20 +1,3 @@
-# Showing example usage of your trained model. It should load your saved model
-# weights, run inference on test cases, print out any results, and provide visualisations where applicable
-
-"""
-predict.py - example usage of a trained model on the HipMRI test split.
-
-Loads the saved weights, runs inference on the test cases, prints per-class
-Dice / IoU, and saves:
-    per_volume_metrics.csv      Dice of every class for every test volume
-    per_slice_prostate.csv   prostate Dice of every test slice
-    dice_by_position.png     prostate Dice along the gland (end slices vs middle)
-    failure_cases.png        input | ground truth | prediction | error overlay
-                            for the worst prostate slices
-
-Example (uses ../runs/unet2d/best_model.pt by default):
-    python predict.py
-"""
 import argparse
 import csv
 import os
