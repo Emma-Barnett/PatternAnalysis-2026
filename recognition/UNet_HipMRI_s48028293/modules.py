@@ -173,7 +173,7 @@ class ImprovedUNet3D(nn.Module):
     Output: (B, num_classes, X, Y, Z) raw logits.
     """
 
-    def __init__(self, num_classes, in_ch=1, base=16, p_drop=0.3):
+    def __init__(self, num_classes, in_ch=1, base=16, p_drop=0.1):
         super().__init__()
         b = base
         # Context (encoder) pathway: conv (stride 2 except level 1) + context module.
@@ -221,8 +221,15 @@ class ImprovedUNet3D(nn.Module):
         out = self.final(torch.cat([self.up1(l2), s1], dim=1))   # 2b, full
 
         # Sum the coarse segmentation maps into the finer ones.
-        seg = self.upscale(self.seg3(l3)) + self.seg2(l2)
+        s3 = self.seg3(l3)                       # 1/4 resolution
+        s2 = self.seg2(l2)                       # 1/2 resolution
+        seg = self.upscale(s3) + s2
         seg = self.upscale(seg) + self.seg1(out)
+        if self.training:                        # auxiliary outputs for deep supervision
+            size = seg.shape[2:]
+            aux2 = F.interpolate(s2, size=size, mode="trilinear", align_corners=False)
+            aux3 = F.interpolate(s3, size=size, mode="trilinear", align_corners=False)
+            return seg, (aux2, aux3)
         return seg
 
 class DiceLoss(nn.Module):

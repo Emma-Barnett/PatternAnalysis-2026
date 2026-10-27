@@ -57,8 +57,13 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
         masks = masks.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
         with torch.amp.autocast(device_type="cuda", enabled=use_cuda):
-            logits = model(images)
-            loss = criterion(logits, masks)
+            out = model(images)
+            if isinstance(out, tuple):           # Improved U-Net in training mode
+                logits, aux = out
+                loss = criterion(logits, masks) + sum(
+                    w * criterion(a, masks) for w, a in zip((0.5, 0.25), aux))
+            else:
+                loss = criterion(out, masks)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
