@@ -234,36 +234,37 @@ class ImprovedUNet3D(nn.Module):
 
 class DiceLoss(nn.Module):
     """
-    Soft multi-class Dice loss, averaged over classes.
+    Soft multi-class Dice loss, as a weighted average over classes.
 
-    Works for 2D (B, C, H, W) and 3D (B, C, D, H, W) logits. Targets are
-    integer class maps without the channel dimension.
+    weights: one value per class (default all 1). A larger prostate weight
+    makes the prostate a bigger share of the loss.
     """
 
-    def __init__(self, num_classes, eps=1e-6):
+    def __init__(self, num_classes, weights=None, eps=1e-6):
         super().__init__()
         self.num_classes = num_classes
         self.eps = eps
+        if weights is None:
+            weights = [1.0] * num_classes
+        w = torch.tensor(weights, dtype=torch.float32)
+        self.weights = w / w.sum()  # normalised so the loss stays between 0 and 1
 
     def forward(self, logits, targets):
         probs = F.softmax(logits.float(), dim=1)
-        onehot = F.one_hot(targets, self.num_classes)
-        onehot = onehot.movedim(-1, 1).float()  # channels-last -> channels-first
+        onehot = F.one_hot(targets, self.num_classes).movedim(-1, 1).float()
         dims = (0,) + tuple(range(2, logits.dim()))  # sum over batch and space
         intersection = torch.sum(probs * onehot, dims)
         cardinality = torch.sum(probs + onehot, dims)
         dice = (2.0 * intersection + self.eps) / (cardinality + self.eps)
-        return 1.0 - dice.mean()
+        return 1.0 - (dice * self.weights.to(dice.device)).sum()
 
 class CombinedLoss(nn.Module):
-    """Cross-entropy + Dice. Dice counters the heavy class imbalance (the
-    prostate is a tiny fraction of the pixels); cross-entropy keeps the
-    gradients well behaved early in training."""
+    """Cross-entropy + (weighted) Dice."""
 
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, dice_weights=None):
         super().__init__()
         self.ce = nn.CrossEntropyLoss()
-        self.dice = DiceLoss(num_classes)
+        self.dice = DiceLoss(num_classes, dice_weights)
 
     def forward(self, logits, targets):
         return self.ce(logits.float(), targets) + self.dice(logits, targets)

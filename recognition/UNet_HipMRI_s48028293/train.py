@@ -16,9 +16,9 @@ from utils import evaluate, format_results
 DEFAULT_DATA_ROOT = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
 RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs")
 MODEL_DEFAULTS = {
-    "unet2d": dict(data_root=DEFAULT_DATA_ROOT, epochs=30, batch_size=32, base=64),
-    "unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16),
-    "improved_unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16),
+    "unet2d": dict(data_root=DEFAULT_DATA_ROOT, epochs=30, batch_size=32, base=64,prostate_weight=3.0),
+    "unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16, prostate_weight=3.0),
+    "improved_unet3d": dict(data_root=DATA_ROOT_3D, epochs=100, batch_size=2, base=16, prostate_weight=3.0),
 }
 
 def parse_args():
@@ -29,6 +29,8 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--prostate-weight", type=float, default=None,          # <- new
+                help="Dice loss weight of the prostate class (default depends on --model)")
     p.add_argument("--base", type=int, default=None, help="channels in the first level")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
@@ -116,7 +118,10 @@ def main():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model: {args.model} | parameters: {n_params:,}")
 
-    criterion = CombinedLoss(NUM_CLASSES)
+    dice_weights = [1.0] * NUM_CLASSES
+    dice_weights[PROSTATE] = args.prostate_weight
+    criterion = CombinedLoss(NUM_CLASSES, dice_weights)
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     scaler = torch.amp.GradScaler(device="cuda", enabled=use_cuda)
@@ -176,6 +181,7 @@ def main():
 
     report = "\n".join([
         f"Model: {args.model} (base {args.base}, {n_params:,} parameters)",
+        f"Prostate Dice weight: {args.prostate_weight}",
         f"Best epoch: {best_epoch} of {args.epochs}",
         f"Training time: {train_time / 60:.1f} min",
         f"Peak VRAM, training:  {train_vram:.0f} MiB (batch size {args.batch_size})",

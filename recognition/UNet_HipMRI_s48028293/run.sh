@@ -14,7 +14,6 @@ MODEL=${1:-unet2d}   # read the model name first
 set --               # clear the arguments so conda's activate doesn't see "unet3d"
 set -e               # stop if train.py fails, so predict.py doesn't run without a checkpoint
 
-# Activate your conda environment
 source $HOME/miniconda3/bin/activate
 conda activate torch
 

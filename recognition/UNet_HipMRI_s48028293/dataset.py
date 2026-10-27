@@ -27,8 +27,8 @@ SPLIT_DIRS = {
 DATA_ROOT_2D = "/home/groups/comp3710/HipMRI_Study_open/keras_slices_data"
 DATA_ROOT_3D = "/home/groups/comp3710/HipMRI_Study_open"
 VOLUME_DIRS = ("semantic_MRs", "semantic_labels_only")
-DOWNSAMPLE = (2, 2, 2)      # downsampling factor per axis of the native volume
-VOL_SIZE = (128, 128, 64)   # after downsampling; each axis divisible by 16
+DOWNSAMPLE = (2, 2, 1)      # downsampling factor per axis of the native volume
+VOL_SIZE = (128, 128, 128)   # after downsampling; each axis divisible by 16
 
 # File discovery and pairing
 def parse_ids(path):
