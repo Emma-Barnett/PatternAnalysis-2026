@@ -1,3 +1,7 @@
+"""
+predict.py runs a trained HipMRI checkpoint on the test split, saves per-volume and per-slice metrics, 
+and plots the prostate Dice by slice position and the worst failure cases.
+"""
 import argparse
 import csv
 import os
@@ -18,6 +22,7 @@ RUNS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runs"
 
 
 def parse_args():
+    # Parse command-line arguments and fill in defaults based on the model type.
     p = argparse.ArgumentParser(description="Run a trained HipMRI model on the test split")
     p.add_argument("--model", default="unet2d", help="which run folder to use")
     p.add_argument("--checkpoint", default=None, help="default: ../runs/<model>/best_model.pt")
@@ -35,8 +40,8 @@ def parse_args():
     return args
 
 def add_positions(rows):
-    """Add 'position' to every prostate-containing slice: 0 and 1 are the two
-    end slices of the gland (base / apex), 0.5 is the middle."""
+    # Add a "position" field to each row, indicating the relative position of the slice along the 
+    # prostate volume (0 = first slice, 1 = last slice).
     volumes = {}
     for r in rows:
         if r["target_px"] > 0:
@@ -47,6 +52,7 @@ def add_positions(rows):
             r["position"] = i / (len(vol_rows) - 1) if len(vol_rows) > 1 else 0.5
 
 def plot_dice_by_position(rows, path, n_bins=10):
+    # Plot the mean prostate Dice by slice position along the prostate volume.
     pos = np.array([r["position"] for r in rows if "position" in r])
     dice = np.array([r["dice"] for r in rows if "position" in r])
     bins = np.minimum((pos * n_bins).astype(int), n_bins - 1)
@@ -63,10 +69,10 @@ def plot_dice_by_position(rows, path, n_bins=10):
     plt.close(fig)
 
 def plot_failures(model, dataset, rows, device, num_classes, path):
-    """Multi-panel figure for the given slices (rows from per_slice)."""
+    #Multi-panel figure for the given slices (rows from per_slice)
     fig, axes = plt.subplots(len(rows), 4, figsize=(12, 3.2 * len(rows)), squeeze=False)
     model.eval()
-    cache = {}  # 3D: predict each volume once, then cut out the slices
+    cache = {}
     for ax_row, r in zip(axes, rows):
         if r["index"] not in cache:
             image, mask, _, _, _ = dataset[r["index"]]
@@ -103,11 +109,11 @@ def plot_failures(model, dataset, rows, device, num_classes, path):
     plt.close(fig)
 
 def main():
+    # Parse command-line arguments, set up the model, data loaders, loss, optimizer, and training loop.
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Rebuild the model exactly as it was trained and load the weights.
     ckpt = torch.load(args.checkpoint, map_location=device)
     num_classes, class_names = ckpt["num_classes"], ckpt["class_names"]
     model = build_model(ckpt["model"], num_classes, base=ckpt["base"]).to(device)

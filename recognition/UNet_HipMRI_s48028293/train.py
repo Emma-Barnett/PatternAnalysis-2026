@@ -1,3 +1,7 @@
+"""
+train.py trains a 2D U-Net, 3D U-Net or 3D Improved U-Net on HipMRI, keeps the best checkpoint by 
+validation prostate Dice, and reports its test results.
+"""
 import argparse
 import json
 import os
@@ -22,6 +26,7 @@ MODEL_DEFAULTS = {
 }
 
 def parse_args():
+    # Parse command-line arguments and fill in defaults based on the model type.
     p = argparse.ArgumentParser(description="Train a HipMRI segmentation model")
     p.add_argument("--model", default="unet2d", choices=list(MODEL_DEFAULTS))
     p.add_argument("--data-root", default=None, help="default depends on --model")
@@ -49,6 +54,7 @@ def parse_args():
     return args  
 
 def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
+    # Train the model for one epoch and return the average loss.
     model.train()
     use_cuda = device.type == "cuda"
     total_loss, n_batches = 0.0, 0
@@ -72,6 +78,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scaler, device):
     return total_loss / max(n_batches, 1)
 
 def plot_history(history, path):
+    # Plot training and validation loss and validation Dice per class.
     epochs = range(1, len(history["train_loss"]) + 1)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
     ax1.plot(epochs, history["train_loss"], label="train")
@@ -96,6 +103,7 @@ def plot_history(history, path):
     plt.close(fig)
 
 def main():
+    # Parse command-line arguments, set up the model, data loaders, loss, optimizer, and training loop.
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
     torch.manual_seed(args.seed)
