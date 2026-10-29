@@ -1,9 +1,18 @@
+"""
+modules.py establishes the 2D, 3D and improved 3D U-Net architectures, and loss function for the HipMRI segmentation task
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 class DoubleConv(nn.Module):
-    """Two 3x3 (2D) or 3x3x3 (3D) convolutions, each followed by batch norm and ReLU."""
+    """
+    The basic block for the standard U-net: two 3x3 (or 3x3x3) convolutions, each followed by batch norm and ReLU.
+    Args:
+        in_ch: Input channels.
+        out_ch: Output channels.
+        dims: 2 for 2D convolutions, 3 for 3D convolutions.
+    """
     def __init__(self, in_ch, out_ch, dims=2):
         super().__init__()
         Conv = nn.Conv2d if dims == 2 else nn.Conv3d
@@ -22,15 +31,21 @@ class DoubleConv(nn.Module):
 
 class UNet2D(nn.Module):
     """
-    Standard 2D U-Net (Ronneberger et al., 2015) with four down/up levels.
+    Standard 2D U-Net with four down/up levels.
+    Args:
+        num_classes: Number of output classes.
+        in_ch: Input channels (1 for MRI).
+        base: Channels in the first level; doubles at each level down.
 
+    Input:  (B, in_ch, H, W) with H and W divisible by 16.
+    Output: (B, num_classes, H, W) raw logits.
     Input:  (B, in_ch, H, W) with H and W divisible by 16.
     Output: (B, num_classes, H, W) raw logits.
     """
 
     def __init__(self, num_classes, in_ch=1, base=64):
         super().__init__()
-        # Encoder: halve the spatial size, double the channels at each level.
+        # Encoder
         self.down1 = DoubleConv(in_ch, base)
         self.down2 = DoubleConv(base, base * 2)
         self.down3 = DoubleConv(base * 2, base * 4)
@@ -38,7 +53,7 @@ class UNet2D(nn.Module):
         self.pool = nn.MaxPool2d(2)
         self.bottleneck = DoubleConv(base * 8, base * 16)
 
-        # Decoder: upsample, concatenate the matching encoder features, convolve.
+        # Decoder
         self.up4 = nn.ConvTranspose2d(base * 16, base * 8, 2, stride=2)
         self.dec4 = DoubleConv(base * 16, base * 8)
         self.up3 = nn.ConvTranspose2d(base * 8, base * 4, 2, stride=2)
@@ -48,7 +63,6 @@ class UNet2D(nn.Module):
         self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
         self.dec1 = DoubleConv(base * 2, base)
 
-        # One logit per class per pixel.
         self.out_conv = nn.Conv2d(base, num_classes, 1)
 
     def forward(self, x):
@@ -66,10 +80,12 @@ class UNet2D(nn.Module):
 
 class UNet3D(nn.Module):
     """
-    3D U-Net (Cicek et al., 2016) with the same four-level topology as UNet2D,
-    but with volumetric 3x3x3 convolutions, 2x2x2 max pooling, 2x2x2 transposed
-    convolutions and skip connections that carry whole feature volumes.
-
+    Standard 3D U-Net with the same four-level topology as UNet2D.
+    Args:
+        num_classes: Number of output classes.
+        in_ch: Input channels.
+        base: Channels in the first level; doubles at each level down.
+    
     Input:  (B, in_ch, X, Y, Z) with X, Y and Z divisible by 16.
     Output: (B, num_classes, X, Y, Z) raw logits.
     """
@@ -110,10 +126,12 @@ class UNet3D(nn.Module):
         return self.out_conv(u1)
 
 class ContextModule(nn.Module):
-    """Pre-activation residual block (Isensee et al., 2018): two 3x3x3
-    convolutions with dropout between them, each preceded by instance norm and
-    LeakyReLU. The input is added back to the output (residual connection)."""
-
+    """
+    Pre-activation residual block used in the improved 3D U-Net, with instance norm, Leak ReLU and 3D dropout.
+    Args:
+        ch: Input and output channels.
+        p_drop: Dropout probability (drops whole feature channels).
+    """
     def __init__(self, ch, p_drop=0.3):
         super().__init__()
         self.block = nn.Sequential(
@@ -130,8 +148,11 @@ class ContextModule(nn.Module):
         return x + self.block(x)
 
 class UpsamplingModule(nn.Module):
-    """Upscale by 2, then a 3x3x3 convolution that halves the channels."""
-
+    """Decoder upsampling.
+    Args:
+        in_ch: Input channels.
+        out_ch: Output channels (half of ``in_ch`` in this network).
+    """
     def __init__(self, in_ch, out_ch):
         super().__init__()
         self.block = nn.Sequential(
@@ -145,8 +166,11 @@ class UpsamplingModule(nn.Module):
         return self.block(x)
 
 class LocalizationModule(nn.Module):
-    """3x3x3 convolution on the concatenated features, then a 1x1x1
-    convolution that halves the channels."""
+    """Decoder block that merges upsampled and skip-connection features
+    Args:
+        in_ch: Channels of the concatenated input.
+        out_ch: Output channels (half of ``in_ch`` in this network).
+    """
 
     def __init__(self, in_ch, out_ch):
         super().__init__()
@@ -164,11 +188,16 @@ class LocalizationModule(nn.Module):
 
 class ImprovedUNet3D(nn.Module):
     """
-    3D Improved U-Net (Isensee et al., 2018): residual context modules,
+    3D Improved U-Net, including residual context modules,
     strided-convolution downsampling, localization modules, instance norm,
-    LeakyReLU and deep supervision (segmentation maps from three decoder
-    levels are upsampled and summed into one output).
+    LeakyReLU and deep supervision.
 
+    Args:
+        num_classes: Number of output classes.
+        in_ch: Input channels (1 for MRI).
+        base: Channels in the first level; doubles at each level down.
+        p_drop: Dropout probability in the context modules (paper: 0.3).
+    
     Input:  (B, in_ch, X, Y, Z) with X, Y and Z divisible by 16.
     Output: (B, num_classes, X, Y, Z) raw logits.
     """
@@ -176,7 +205,7 @@ class ImprovedUNet3D(nn.Module):
     def __init__(self, num_classes, in_ch=1, base=16, p_drop=0.1):
         super().__init__()
         b = base
-        # Context (encoder) pathway: conv (stride 2 except level 1) + context module.
+        # Encoder pathway
         self.conv1 = nn.Conv3d(in_ch, b, 3, padding=1, bias=False)
         self.ctx1 = ContextModule(b, p_drop)
         self.conv2 = nn.Conv3d(b, b * 2, 3, stride=2, padding=1, bias=False)
@@ -188,7 +217,7 @@ class ImprovedUNet3D(nn.Module):
         self.conv5 = nn.Conv3d(b * 8, b * 16, 3, stride=2, padding=1, bias=False)
         self.ctx5 = ContextModule(b * 16, p_drop)
 
-        # Localization (decoder) pathway.
+        # Decoder pathway.
         self.up4 = UpsamplingModule(b * 16, b * 8)
         self.loc4 = LocalizationModule(b * 16, b * 8)
         self.up3 = UpsamplingModule(b * 8, b * 4)
@@ -209,23 +238,22 @@ class ImprovedUNet3D(nn.Module):
         self.upscale = nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False)
 
     def forward(self, x):
-        s1 = self.ctx1(self.conv1(x))    # b channels,   full resolution
-        s2 = self.ctx2(self.conv2(s1))   # 2b,           1/2
-        s3 = self.ctx3(self.conv3(s2))   # 4b,           1/4
-        s4 = self.ctx4(self.conv4(s3))   # 8b,           1/8
-        x = self.ctx5(self.conv5(s4))    # 16b,          1/16 (bottleneck)
+        s1 = self.ctx1(self.conv1(x))
+        s2 = self.ctx2(self.conv2(s1))
+        s3 = self.ctx3(self.conv3(s2))
+        s4 = self.ctx4(self.conv4(s3)) 
+        x = self.ctx5(self.conv5(s4))
 
-        x = self.loc4(torch.cat([self.up4(x), s4], dim=1))       # 8b, 1/8
-        l3 = self.loc3(torch.cat([self.up3(x), s3], dim=1))      # 4b, 1/4
-        l2 = self.loc2(torch.cat([self.up2(l3), s2], dim=1))     # 2b, 1/2
-        out = self.final(torch.cat([self.up1(l2), s1], dim=1))   # 2b, full
+        x = self.loc4(torch.cat([self.up4(x), s4], dim=1))
+        l3 = self.loc3(torch.cat([self.up3(x), s3], dim=1))
+        l2 = self.loc2(torch.cat([self.up2(l3), s2], dim=1))
+        out = self.final(torch.cat([self.up1(l2), s1], dim=1))
 
-        # Sum the coarse segmentation maps into the finer ones.
-        s3 = self.seg3(l3)                       # 1/4 resolution
-        s2 = self.seg2(l2)                       # 1/2 resolution
+        s3 = self.seg3(l3)
+        s2 = self.seg2(l2)
         seg = self.upscale(s3) + s2
         seg = self.upscale(seg) + self.seg1(out)
-        if self.training:                        # auxiliary outputs for deep supervision
+        if self.training: 
             size = seg.shape[2:]
             aux2 = F.interpolate(s2, size=size, mode="trilinear", align_corners=False)
             aux3 = F.interpolate(s3, size=size, mode="trilinear", align_corners=False)
@@ -235,9 +263,11 @@ class ImprovedUNet3D(nn.Module):
 class DiceLoss(nn.Module):
     """
     Soft multi-class Dice loss, as a weighted average over classes.
-
-    weights: one value per class (default all 1). A larger prostate weight
-    makes the prostate a bigger share of the loss.
+    Args:
+        num_classes: Number of classes.
+        weights: One weight per class (default all 1). Normalised to sum to 1,
+            so a larger prostate weight gives it a bigger share of the loss.
+        eps: Smoothing term that avoids division by zero.
     """
 
     def __init__(self, num_classes, weights=None, eps=1e-6):
@@ -247,19 +277,23 @@ class DiceLoss(nn.Module):
         if weights is None:
             weights = [1.0] * num_classes
         w = torch.tensor(weights, dtype=torch.float32)
-        self.weights = w / w.sum()  # normalised so the loss stays between 0 and 1
+        self.weights = w / w.sum()
 
     def forward(self, logits, targets):
         probs = F.softmax(logits.float(), dim=1)
         onehot = F.one_hot(targets, self.num_classes).movedim(-1, 1).float()
-        dims = (0,) + tuple(range(2, logits.dim()))  # sum over batch and space
+        dims = (0,) + tuple(range(2, logits.dim()))
         intersection = torch.sum(probs * onehot, dims)
         cardinality = torch.sum(probs + onehot, dims)
         dice = (2.0 * intersection + self.eps) / (cardinality + self.eps)
         return 1.0 - (dice * self.weights.to(dice.device)).sum()
 
 class CombinedLoss(nn.Module):
-    """Cross-entropy + (weighted) Dice."""
+    """Cross-entropy plus weighted soft Dice loss.
+    Args:
+        num_classes: Number of classes.
+        dice_weights: Optional per-class weights for the Dice term.
+    """
 
     def __init__(self, num_classes, dice_weights=None):
         super().__init__()
@@ -276,7 +310,7 @@ MODELS = {
 }
 
 def build_model(name, num_classes, base=64):
-    """Create a model by name. New models get registered in MODELS."""
+    # Create a model by name
     if name not in MODELS:
         raise ValueError(f"Unknown model '{name}'. Available: {', '.join(MODELS)}")
     return MODELS[name](num_classes, in_ch=1, base=base)
