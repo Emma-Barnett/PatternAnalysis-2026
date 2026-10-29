@@ -13,13 +13,13 @@
 #SBATCH --output=unet_%j.out
 #SBATCH --error=unet_%j.err
 
-MODEL=$1             # model name is required
+MODEL=$1
 if [ -z "$MODEL" ]; then
     echo "Error: give a model name, e.g. sbatch run.sh unet2d" >&2
     exit 1
 fi
-set --               # clear the arguments so conda's activate doesn't see the model name
-set -e               # stop if train.py fails, so predict.py doesn't run without a checkpoint
+set --
+set -e
 
 source $HOME/miniconda3/bin/activate
 conda activate torch
