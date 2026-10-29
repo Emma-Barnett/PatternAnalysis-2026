@@ -1,17 +1,24 @@
 #!/bin/bash
-# Usage:  sbatch run.sh                    (2D U-Net)
+# Usage:  sbatch run.sh unet2d             (2D U-Net)
 #         sbatch run.sh unet3d             (3D U-Net)
 #         sbatch run.sh improved_unet3d    (3D Improved U-Net)
+#
+# Default settings for each model are in MODEL_DEFAULTS in train.py.
 #SBATCH --job-name=unet_hipmri
 #SBATCH --partition=comp3710
 #SBATCH --account=comp3710
 #SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
 #SBATCH --time=03:00:00
 #SBATCH --output=unet_%j.out
 #SBATCH --error=unet_%j.err
 
-MODEL=${1:-unet2d}   # read the model name first
-set --               # clear the arguments so conda's activate doesn't see "unet3d"
+MODEL=$1             # model name is required
+if [ -z "$MODEL" ]; then
+    echo "Error: give a model name, e.g. sbatch run.sh unet2d" >&2
+    exit 1
+fi
+set --               # clear the arguments so conda's activate doesn't see the model name
 set -e               # stop if train.py fails, so predict.py doesn't run without a checkpoint
 
 source $HOME/miniconda3/bin/activate

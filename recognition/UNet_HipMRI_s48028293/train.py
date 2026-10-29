@@ -34,8 +34,6 @@ def parse_args():
     p.add_argument("--base", type=int, default=None, help="channels in the first level")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--resplit", action="store_true",
-                    help="pool all slices and re-split by patient ID")
     p.add_argument("--limit", type=int, default=None,
                     help="use only the first N slices per split (smoke test)")
     p.add_argument("--no-preload", action="store_true",
@@ -111,8 +109,8 @@ def main():
         print("GPU:", torch.cuda.get_device_name(0))
 
     loaders = get_loaders(args.data_root, batch_size=args.batch_size, img_size=args.img_size,
-                        workers=args.workers, resplit=args.resplit, limit=args.limit,
-                        preload=not args.no_preload, seed=args.seed, dims=args.dims)
+                        workers=args.workers, limit=args.limit,
+                        preload=not args.no_preload, dims=args.dims)
 
     model = build_model(args.model, NUM_CLASSES, base=args.base).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -152,7 +150,7 @@ def main():
                         "dims": args.dims, "base": args.base, "num_classes": NUM_CLASSES,
                         "class_names": CLASS_NAMES, "img_size": args.img_size,
                         "downsample": DOWNSAMPLE,
-                        "resplit": args.resplit, "seed": args.seed,
+                        "seed": args.seed,
                         "epoch": epoch, "val_prostate_dice": best_dice}, ckpt_path)
             flag = " *saved*"
         print(f"Epoch [{epoch}/{args.epochs}] train loss {train_loss:.4f} | "

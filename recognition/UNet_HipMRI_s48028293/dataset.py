@@ -41,7 +41,6 @@ def parse_ids(path):
         )
     return int(nums[0]), int(nums[1]), int(nums[2])
 
-
 def list_pairs(img_dir, seg_dir):
     """Pair every image with its mask by (case, week, slice).
 
@@ -94,58 +93,32 @@ def assert_no_leakage(splits):
                     f"cases {sorted(shared)}. Re-run with --resplit."
                 )
 
-# Not being implemented, currently using given splits
-def split_by_patient(pairs, fractions=(0.7, 0.15, 0.15), seed=42):
-    """Split slices into train/val/test so that every slice (and every weekly
-    scan) of a patient lands in exactly one split."""
-    patients = sorted(patients_of(pairs))
-    random.Random(seed).shuffle(patients)
-    n_train = round(fractions[0] * len(patients))
-    n_val = round(fractions[1] * len(patients))
-    groups = {
-        "train": set(patients[:n_train]),
-        "val": set(patients[n_train:n_train + n_val]),
-        "test": set(patients[n_train + n_val:]),
-    }
-    return {name: [p for p in pairs if p[2][0] in ids] for name, ids in groups.items()}
-
-def get_splits(data_root, resplit=False, seed=42):
-    """Return {'train': pairs, 'val': pairs, 'test': pairs}.
-
-    By default the provided folders are used and verified to be disjoint at
-    the patient level. With resplit=True all slices are pooled and re-split
-    by patient ID instead."""
+def get_splits(data_root):
+    """Return {'train': pairs, 'val': pairs, 'test': pairs} from the provided
+    2D split folders, verified to be disjoint at the patient level."""
     splits = {
         name: list_pairs(os.path.join(data_root, img), os.path.join(data_root, seg))
         for name, (img, seg) in SPLIT_DIRS.items()
     }
-    if resplit:
-        pooled = [p for pairs in splits.values() for p in pairs]
-        splits = split_by_patient(pooled, seed=seed)
     assert_no_leakage(splits)
     return splits
 
-def get_volume_splits(data_root=DATA_ROOT_3D, resplit=False, seed=42, slices_root=DATA_ROOT_2D):
+def get_volume_splits(data_root=DATA_ROOT_3D, slices_root=DATA_ROOT_2D):
     """3D volumes: return {'train': pairs, 'val': pairs, 'test': pairs}.
 
-    The 3D data has no provided split, so by default each patient goes in the
-    split it occupies in the 2D slice folders. This makes the 3D test set the
-    same patients as the 2D baseline's. Patients with no 2D slices go to train.
-    With resplit=True patients are split 70/15/15 by split_by_patient instead."""
+    The 3D data has no provided split, so each patient goes in the split it
+    occupies in the 2D slice folders. This makes the 3D test set the same
+    patients as the 2D baseline's. Patients with no 2D slices go to train."""
     pairs = list_volume_pairs(*(os.path.join(data_root, d) for d in VOLUME_DIRS))
-    if resplit:
-        splits = split_by_patient(pairs, seed=seed)
-    else:
-        slice_splits = get_splits(slices_root, resplit=False)
-        owner = {case: name for name, sp in slice_splits.items() for case in patients_of(sp)}
-        missing = sorted(patients_of(pairs) - owner.keys())
-        if missing:
-            print(f"  patients with no 2D slices, assigned to train: {missing}")
-        splits = {name: [p for p in pairs if owner.get(p[2][0], "train") == name]
-                    for name in SPLIT_DIRS}
+    slice_splits = get_splits(slices_root)
+    owner = {case: name for name, sp in slice_splits.items() for case in patients_of(sp)}
+    missing = sorted(patients_of(pairs) - owner.keys())
+    if missing:
+        print(f"  patients with no 2D slices, assigned to train: {missing}")
+    splits = {name: [p for p in pairs if owner.get(p[2][0], "train") == name]
+            for name in SPLIT_DIRS}
     assert_no_leakage(splits)
     return splits
-
 # Preprocessing
 def load_slice(path):
     """Load one 2D Nifti slice as a NumPy array (drops a trailing extra dim)."""
@@ -173,7 +146,6 @@ def fit_to_shape(arr, shape):
 def preprocess_image(arr, img_size):
     arr = fit_to_shape(arr.astype(np.float32), img_size)
     return (arr - arr.mean()) / (arr.std() + 1e-8)  # per-slice z-score
-
 
 def preprocess_mask(arr, img_size):
     return fit_to_shape(np.rint(arr).astype(np.uint8), img_size)
@@ -372,16 +344,15 @@ class HipMRI3D(Dataset):
             img, mask = self.augment(img, mask)
         return img, mask, case, week, -1
     
-def get_loaders(data_root, batch_size=32, img_size=IMG_SIZE, workers=4,
-                resplit=False, limit=None, preload=True, seed=42, dims=2):
+def get_loaders(data_root, batch_size=32, img_size=IMG_SIZE, workers=4, limit=None, preload=True, dims=2):
     """Build the train/val/test loaders for the 2D slices (dims=2) or the
     3D volumes (dims=3).
 
     limit: keep only the first N slices / volumes of each split, for quick smoke tests."""
     if dims == 2:
-        splits = get_splits(data_root, resplit=resplit, seed=seed)
+        splits = get_splits(data_root)
     else:
-        splits = get_volume_splits(data_root, resplit=resplit, seed=seed)
+        splits = get_volume_splits(data_root)
     if limit:
         splits = {name: pairs[:limit] for name, pairs in splits.items()}
     unit = "slices" if dims == 2 else "volumes"

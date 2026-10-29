@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import (DATA_ROOT_3D, DOWNSAMPLE, PROSTATE, HipMRI2D, HipMRI3D, get_splits, get_volume_splits)
+from dataset import (DATA_ROOT_2D, DATA_ROOT_3D, DOWNSAMPLE, PROSTATE, HipMRI2D, HipMRI3D,get_splits, get_volume_splits)
 from modules import build_model
 from utils import evaluate, format_results
 
@@ -115,13 +115,12 @@ def main():
     print(f"Loaded {ckpt['model']} from epoch {ckpt['epoch']} "
         f"(val prostate DSC {ckpt['val_prostate_dice']:.4f})")
 
-    # Same test split as training (no shuffling, so slice order is stable).
-    dims = ckpt.get("dims", 2)  # old 2D checkpoints have no "dims"
+    dims = ckpt.get("dims", 2)
     if args.data_root is None:
         args.data_root = DATA_ROOT_3D if dims == 3 else DEFAULT_DATA_ROOT
     split_fn = get_volume_splits if dims == 3 else get_splits
-    pairs = split_fn(args.data_root, resplit=ckpt.get("resplit", False),
-                    seed=ckpt.get("seed", 42))["test"]
+    pairs = split_fn(args.data_root)["test"]
+
     if args.limit:
         pairs = pairs[:args.limit]
     if dims == 3:
