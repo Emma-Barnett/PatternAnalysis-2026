@@ -1,3 +1,7 @@
+"""
+dataset.py manages the data loading, preprocessing, splitting and image augmentation of the HipMRI prostate dataset.
+"""
+
 import glob
 import math
 import os
@@ -13,8 +17,7 @@ from torch.utils.data import DataLoader, Dataset
 # Constants
 CLASS_NAMES = ["background", "body", "bone", "bladder", "rectum", "prostate"]
 NUM_CLASSES = len(CLASS_NAMES)
-PROSTATE = 5  # label index of the prostate
-
+PROSTATE = 5
 IMG_SIZE = (256, 128)
 
 SPLIT_DIRS = {
@@ -30,9 +33,9 @@ VOLUME_DIRS = ("semantic_MRs", "semantic_labels_only")
 DOWNSAMPLE = (2, 2, 1)      # downsampling factor per axis of the native volume
 VOL_SIZE = (128, 128, 128)   # after downsampling; each axis divisible by 16
 
-# File discovery and pairing
+# SPLIT AND FILE HANDLING FUNCTIONS
 def parse_ids(path):
-    """Return (case_id, week, slice_idx) from the numbers in a file name."""
+    # Extract the patient, week and slice numbers from a 2D slice file name.
     nums = re.findall(r"\d+", os.path.basename(path))
     if len(nums) < 3:
         raise ValueError(
@@ -42,9 +45,7 @@ def parse_ids(path):
     return int(nums[0]), int(nums[1]), int(nums[2])
 
 def list_pairs(img_dir, seg_dir):
-    """Pair every image with its mask by (case, week, slice).
-
-    Returns a sorted list of (img_path, seg_path, (case, week, slice))."""
+    #Pair every image with its mask by (case, week, slice).
     imgs = {parse_ids(p): p for p in glob.glob(os.path.join(img_dir, "*.nii*"))}
     segs = {parse_ids(p): p for p in glob.glob(os.path.join(seg_dir, "*.nii*"))}
     if not imgs or not segs:
@@ -55,7 +56,7 @@ def list_pairs(img_dir, seg_dir):
     return [(imgs[k], segs[k], k) for k in sorted(imgs)]
 
 def parse_volume_ids(path):
-    """Return (case_id, week) from a 3D file name, e.g. Case_004_Week0_LFOV.nii.gz."""
+    # Extract the patient and week numbers from a 3D volume file name.
     nums = re.findall(r"\d+", os.path.basename(path))
     if len(nums) < 2:
         raise ValueError(
@@ -65,9 +66,7 @@ def parse_volume_ids(path):
     return int(nums[0]), int(nums[1])
 
 def list_volume_pairs(img_dir, seg_dir):
-    """Pair every 3D scan with its label volume by (case, week).
-
-    Returns a sorted list of (img_path, seg_path, (case, week))."""
+    # Pair every 3D scan with its label volume by (case, week).
     imgs = {parse_volume_ids(p): p for p in glob.glob(os.path.join(img_dir, "*.nii*"))}
     segs = {parse_volume_ids(p): p for p in glob.glob(os.path.join(seg_dir, "*.nii*"))}
     if not imgs or not segs:
@@ -77,12 +76,11 @@ def list_volume_pairs(img_dir, seg_dir):
         raise ValueError(f"{unmatched} images/masks have no partner in {img_dir} / {seg_dir}")
     return [(imgs[k], segs[k], k) for k in sorted(imgs)]
 
-# Leakage-free splitting
 def patients_of(pairs):
     return {key[0] for _, _, key in pairs}
 
 def assert_no_leakage(splits):
-    """Raise if any patient appears in more than one split."""
+    #Checks if any patient appears in more than one split
     names = list(splits)
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
@@ -94,8 +92,7 @@ def assert_no_leakage(splits):
                 )
 
 def get_splits(data_root):
-    """Return {'train': pairs, 'val': pairs, 'test': pairs} from the provided
-    2D split folders, verified to be disjoint at the patient level."""
+    #Load the provided 2D train/validate/test split.
     splits = {
         name: list_pairs(os.path.join(data_root, img), os.path.join(data_root, seg))
         for name, (img, seg) in SPLIT_DIRS.items()
@@ -104,11 +101,7 @@ def get_splits(data_root):
     return splits
 
 def get_volume_splits(data_root=DATA_ROOT_3D, slices_root=DATA_ROOT_2D):
-    """3D volumes: return {'train': pairs, 'val': pairs, 'test': pairs}.
-
-    The 3D data has no provided split, so each patient goes in the split it
-    occupies in the 2D slice folders. This makes the 3D test set the same
-    patients as the 2D baseline's. Patients with no 2D slices go to train."""
+    # Determine the train/validate/test split for the 3D volumes based on the 2D slice split.
     pairs = list_volume_pairs(*(os.path.join(data_root, d) for d in VOLUME_DIRS))
     slice_splits = get_splits(slices_root)
     owner = {case: name for name, sp in slice_splits.items() for case in patients_of(sp)}
@@ -119,16 +112,17 @@ def get_volume_splits(data_root=DATA_ROOT_3D, slices_root=DATA_ROOT_2D):
             for name in SPLIT_DIRS}
     assert_no_leakage(splits)
     return splits
-# Preprocessing
+
+# LOAD AND PREPROCESSING FUNCTIONS
 def load_slice(path):
-    """Load one 2D Nifti slice as a NumPy array (drops a trailing extra dim)."""
+    #Load one 2D Nifti slice as a NumPy array (drops a trailing extra dim)
     arr = nib.load(path).get_fdata(caching="unchanged")
     if arr.ndim == 3:
         arr = arr[:, :, 0]
     return arr
 
 def fit_to_shape(arr, shape):
-    """Centre-crop and/or zero-pad a 2D array to the target shape."""
+    #Centre-crop and/or zero-pad a 2D array to the target shape
     out = np.zeros(shape, dtype=arr.dtype)
     src, dst = [], []
     for have, want in zip(arr.shape, shape):
@@ -144,67 +138,63 @@ def fit_to_shape(arr, shape):
     return out
 
 def preprocess_image(arr, img_size):
+    # Resize and z-score a 2D image slice
     arr = fit_to_shape(arr.astype(np.float32), img_size)
     return (arr - arr.mean()) / (arr.std() + 1e-8)  # per-slice z-score
 
 def preprocess_mask(arr, img_size):
+    # Resize and round a 2D mask slice
     return fit_to_shape(np.rint(arr).astype(np.uint8), img_size)
 
 def load_volume(path):
-    """Load one 3D Nifti volume as a NumPy array (drops a trailing extra dim)."""
+    #Load one 3D Nifti volume as a NumPy array (drops a trailing extra dim)
     arr = nib.load(path).get_fdata(caching="unchanged")
     if arr.ndim == 4:
         arr = arr[:, :, :, 0]
     return arr
 
 def downsampled_shape(shape, factor):
+    # Compute the shape of a volume after downsampling
     return tuple(max(1, round(s / f)) for s, f in zip(shape, factor))
 
 def downsample_image(arr, factor):
-    """Area (block-average) downsampling, which also avoids aliasing."""
+    # Area (block-average) downsampling, which also avoids aliasing.
     t = torch.from_numpy(arr.astype(np.float32))[None, None]
     t = F.interpolate(t, size=downsampled_shape(arr.shape, factor), mode="area")
     return t[0, 0].numpy()
 
 def downsample_mask(arr, factor):
-    """Majority-vote downsampling: average each class's one-hot map over the
-    block and keep the most common class. Nearest-neighbour sampling would
-    drop thin structures such as the rectal wall."""
+    # Area downsampling of a mask: convert to one-hot, downsample, then take argmax.
     labels = torch.from_numpy(np.rint(arr).astype(np.int64))
     onehot = F.one_hot(labels, NUM_CLASSES).movedim(-1, 0).float()
     onehot = F.interpolate(onehot[None], size=downsampled_shape(arr.shape, factor), mode="area")
     return onehot[0].argmax(0).numpy().astype(np.uint8)
 
 def preprocess_volume(img, seg, vol_size=VOL_SIZE, factor=DOWNSAMPLE):
-    """Native scan + labels -> downsampled, cropped/padded, z-scored volume."""
+    # Downsample, crop and pad a 3D volume and its mask, then z-score the image.
     img = fit_to_shape(downsample_image(img, factor), vol_size)
     seg = fit_to_shape(downsample_mask(seg, factor), vol_size)
-    img = (img - img.mean()) / (img.std() + 1e-8)  # per-volume z-score
+    img = (img - img.mean()) / (img.std() + 1e-8) 
     return img.astype(np.float32), seg
 
-# Augmentation (applied to training slices only)
+# AUGMENTATION CLASSES
 class Augment:
-    """Random small rotation, scaling and translation applied identically to
-    the image (bilinear) and mask (nearest), plus intensity jitter on the image.
-
-    Flips are deliberately left out: pelvic anatomy has a fixed orientation,
-    so a flipped slice is not a realistic scan."""
-
+    # Random small rotation, scaling and translation applied identically to
+    # the image (bilinear) and mask (nearest), plus intensity jitter on the image.
     def __init__(self, max_rot_deg=10.0, max_scale=0.1, max_shift=0.05, intensity=0.1):
         self.max_rot = math.radians(max_rot_deg)
         self.max_scale = max_scale
         self.max_shift = max_shift
         self.intensity = intensity
 
+    # Apply the augmentation to a 2D image and mask.
     def __call__(self, img, mask):
-        # img: (1, H, W) float, mask: (H, W) long
         h, w = mask.shape
         angle = random.uniform(-self.max_rot, self.max_rot)
         scale = 1.0 + random.uniform(-self.max_scale, self.max_scale)
         tx = random.uniform(-self.max_shift, self.max_shift) * 2
         ty = random.uniform(-self.max_shift, self.max_shift) * 2
         cos, sin = math.cos(angle) * scale, math.sin(angle) * scale
-        # The h/w factors keep the rotation rigid on a non-square image.
         theta = torch.tensor([[cos, -sin * h / w, tx],
                               [sin * w / h, cos, ty]], dtype=torch.float32)
         grid = F.affine_grid(theta[None], (1, 1, h, w), align_corners=False)
@@ -213,20 +203,14 @@ class Augment:
         mask = F.grid_sample(mask[None, None].float(), grid, mode="nearest",
                             padding_mode="zeros", align_corners=False)[0, 0].long()
 
-        # Intensity: random contrast and brightness (images are z-scored).
         img = img * (1.0 + random.uniform(-self.intensity, self.intensity))
         img = img + random.uniform(-self.intensity, self.intensity)
         return img, mask
 
 class Augment3D(Augment):
-    """3D version of Augment: the same in-plane rotation, scaling and shift
-    applied to every slice, plus a small scaling along the slice axis.
-    Out-of-plane rotations are left out because the slices are thick."""
-
+    # Random small rotation, scaling and translation applied identically to
+    #  the image (bilinear) and mask (nearest), plus intensity jitter on the image.
     def __call__(self, img, mask):
-        # img: (1, X, Y, Z) float, mask: (X, Y, Z) long; Z is the slice axis.
-        # affine_grid treats the volume as (D, H, W) = (X, Y, Z), and the rows
-        # of theta are ordered (W, H, D) = (z, y, x).
         nx, ny, nz = mask.shape
         angle = random.uniform(-self.max_rot, self.max_rot)
         s = 1.0 + random.uniform(-self.max_scale, self.max_scale)
@@ -234,7 +218,6 @@ class Augment3D(Augment):
         tx = random.uniform(-self.max_shift, self.max_shift) * 2
         ty = random.uniform(-self.max_shift, self.max_shift) * 2
         cos, sin = math.cos(angle) * s, math.sin(angle) * s
-        # Size ratios keep the rotation rigid on a non-square plane (as in Augment).
         theta = torch.tensor([[sz, 0.0, 0.0, 0.0],
                               [0.0, cos, -sin * nx / ny, ty],
                               [0.0, sin * ny / nx, cos, tx]], dtype=torch.float32)
@@ -248,20 +231,9 @@ class Augment3D(Augment):
         img = img + random.uniform(-self.intensity, self.intensity)
         return img, mask
 
-# Dataset
+# DATASETS AND LOADERS CLASSES
 class HipMRI2D(Dataset):
-    """HipMRI 2D slices.
-
-    Each item is (image, mask, case_id, week, slice_idx):
-        image (1, H, W) float32, z-scored
-        mask  (H, W) int64 class indices
-    The IDs let the evaluation code group slices back into patient volumes.
-
-    preload=True reads everything into RAM once (about 2 GB for the full
-    training set), which makes each epoch much faster than re-reading
-    compressed Nifti files.
-    """
-
+    # HipMRI 2D slices, downsampled.
     def __init__(self, pairs, img_size=IMG_SIZE, augment=None, preload=True):
         self.pairs = pairs
         self.img_size = tuple(img_size)
@@ -280,9 +252,11 @@ class HipMRI2D(Dataset):
                 raise ValueError(f"Found label {masks.max()} but NUM_CLASSES is {NUM_CLASSES}")
             self.cache = (images, masks)
 
+    # Return the number of slices in this dataset.
     def __len__(self):
         return len(self.pairs)
 
+    #  Return the (image, mask, case_id, week, slice_idx) tuple for the given index.
     def __getitem__(self, idx):
         img_path, seg_path, (case, week, slice_idx) = self.pairs[idx]
         if self.cache is not None:
@@ -297,15 +271,7 @@ class HipMRI2D(Dataset):
         return img, mask, case, week, slice_idx
 
 class HipMRI3D(Dataset):
-    """HipMRI 3D weekly scans, downsampled.
-
-    Each item is (image, mask, case_id, week, -1):
-        image (1, X, Y, Z) float32, z-scored per volume
-        mask  (X, Y, Z) int64 class indices
-    The -1 keeps the same tuple layout as HipMRI2D (a volume has no single slice index).
-    preload=True downsamples every volume once and keeps it in RAM (~4 MB each).
-    """
-
+    # HipMRI 3D weekly scans, downsampled.
     def __init__(self, pairs, vol_size=VOL_SIZE, downsample=DOWNSAMPLE, augment=None, preload=True):
         self.pairs = pairs
         self.vol_size = tuple(vol_size)
@@ -324,14 +290,17 @@ class HipMRI3D(Dataset):
                 raise ValueError(f"Found label {masks.max()} but NUM_CLASSES is {NUM_CLASSES}")
             self.cache = (images, masks)
 
+    # Load and preprocess one 3D volume and its mask.
     def _load(self, idx):
         img_path, seg_path, _ = self.pairs[idx]
         return preprocess_volume(load_volume(img_path), load_volume(seg_path),
                                 self.vol_size, self.downsample)
 
+    # Return the number of volumes in this dataset.
     def __len__(self):
         return len(self.pairs)
 
+    # Return the (image, mask, case_id, week, -1) tuple for the given index.
     def __getitem__(self, idx):
         case, week = self.pairs[idx][2]
         if self.cache is not None:
@@ -345,10 +314,7 @@ class HipMRI3D(Dataset):
         return img, mask, case, week, -1
     
 def get_loaders(data_root, batch_size=32, img_size=IMG_SIZE, workers=4, limit=None, preload=True, dims=2):
-    """Build the train/val/test loaders for the 2D slices (dims=2) or the
-    3D volumes (dims=3).
-
-    limit: keep only the first N slices / volumes of each split, for quick smoke tests."""
+    #Build the train/val/test loaders for the 2D slices (dims=2) or the 3D volumes (dims=3).
     if dims == 2:
         splits = get_splits(data_root)
     else:
@@ -379,9 +345,8 @@ def get_loaders(data_root, batch_size=32, img_size=IMG_SIZE, workers=4, limit=No
         "test": DataLoader(sets["test"], shuffle=False, **common),
     }
 
-# Quick data check: python dataset.py   (optionally followed by a data path)
 def inspect_data(data_root, n_files=300):
-    """Print patient counts, leakage status, image shapes and label values."""
+    # Print patient counts, leakage status, image shapes and label values."""
     splits = {
         name: list_pairs(os.path.join(data_root, img), os.path.join(data_root, seg))
         for name, (img, seg) in SPLIT_DIRS.items()
